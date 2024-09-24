@@ -93,6 +93,7 @@ func NewAwsS3ReverseProxy(opts Options) (*Handler, error) {
 		Debug:                 opts.Debug,
 		UpstreamScheme:        scheme,
 		UpstreamEndpoint:      opts.UpstreamEndpoint,
+		UpstreamRegion:      	 opts.Region,
 		AllowedSourceEndpoint: opts.AllowedSourceEndpoint,
 		AllowedSourceSubnet:   parsedAllowedSourceSubnet,
 		AWSCredentials:        parsedAwsCredentials,

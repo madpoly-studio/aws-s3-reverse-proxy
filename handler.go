@@ -14,6 +14,7 @@ import (
 	"time"
 
 	v4 "github.com/aws/aws-sdk-go/aws/signer/v4"
+	v2 "github.com/aws/aws-sdk-go/private/signer/v2"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -31,6 +32,9 @@ type Handler struct {
 	// Upstream S3 endpoint URL
 	UpstreamEndpoint string
 
+	// Upstream S3 region
+	UpstreamRegion string
+
 	// Allowed endpoint, i.e., Host header to accept incoming requests from
 	AllowedSourceEndpoint string
 
@@ -41,7 +45,7 @@ type Handler struct {
 	AWSCredentials map[string]string
 
 	// AWS Signature v4
-	Signers map[string]*v4.Signer
+	Signers map[string]*v2.signer
 
 	// Reverse Proxy
 	Proxy *httputil.ReverseProxy
@@ -66,11 +70,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, proxyReq)
 }
 
-func (h *Handler) sign(signer *v4.Signer, req *http.Request, region string) error {
+func (h *Handler) sign(signer *v2.signer, req *http.Request, region string) error {
 	return h.signWithTime(signer, req, region, time.Now())
 }
 
-func (h *Handler) signWithTime(signer *v4.Signer, req *http.Request, region string, signTime time.Time) error {
+func (h *Handler) signWithTime(signer *v2.signer, req *http.Request, region string, signTime time.Time) error {
 	body := bytes.NewReader([]byte{})
 	if req.Body != nil {
 		b, err := ioutil.ReadAll(req.Body)
@@ -80,7 +84,7 @@ func (h *Handler) signWithTime(signer *v4.Signer, req *http.Request, region stri
 		body = bytes.NewReader(b)
 	}
 
-	_, err := signer.Sign(req, body, "s3", region, signTime)
+	_, err := signer.SignSDKRequest(req)
 	return err
 }
 
@@ -124,7 +128,7 @@ func (h *Handler) validateIncomingHeaders(req *http.Request) (string, string, er
 		return "", "", fmt.Errorf("invalid Authorization header: Credential not found: %v", req)
 	}
 	receivedAccessKeyID := match[1]
-	region := match[2]
+	region := h.UpstreamRegion
 
 	// Validate the received Credential (ACCESS_KEY_ID) is allowed
 	for accessKeyID := range h.AWSCredentials {
@@ -135,7 +139,7 @@ func (h *Handler) validateIncomingHeaders(req *http.Request) (string, string, er
 	return "", "", fmt.Errorf("invalid AccessKeyID in Credential: %v", req)
 }
 
-func (h *Handler) generateFakeIncomingRequest(signer *v4.Signer, req *http.Request, region string) (*http.Request, error) {
+func (h *Handler) generateFakeIncomingRequest(signer *v2.signer, req *http.Request, region string) (*http.Request, error) {
 	fakeReq, err := http.NewRequest(req.Method, req.URL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -169,7 +173,7 @@ func (h *Handler) generateFakeIncomingRequest(signer *v4.Signer, req *http.Reque
 	return fakeReq, nil
 }
 
-func (h *Handler) assembleUpstreamReq(signer *v4.Signer, req *http.Request, region string) (*http.Request, error) {
+func (h *Handler) assembleUpstreamReq(signer *v2.signer, req *http.Request, region string) (*http.Request, error) {
 	upstreamEndpoint := h.UpstreamEndpoint
 	if len(upstreamEndpoint) == 0 {
 		upstreamEndpoint = fmt.Sprintf("s3.%s.amazonaws.com", region)
@@ -184,11 +188,15 @@ func (h *Handler) assembleUpstreamReq(signer *v4.Signer, req *http.Request, regi
 	if err != nil {
 		return nil, err
 	}
-	if val, ok := req.Header["Content-Type"]; ok {
-		proxyReq.Header["Content-Type"] = val
-	}
-	if val, ok := req.Header["Content-Md5"]; ok {
-		proxyReq.Header["Content-Md5"] = val
+	// Copy signed headers except host
+	authorizationHeader := req.Header.Get("authorization")
+	match := awsAuthorizationSignedHeadersRegexp.FindStringSubmatch(authorizationHeader)
+	if len(match) == 2 {
+		for _, header := range strings.Split(match[1], ";") {
+			if header != "host" {
+				proxyReq.Header.Set(header, req.Header.Get(header))
+			}
+		}
 	}
 
 	// Sign the upstream request
